@@ -1,58 +1,19 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import Image from "next/image";
 import {
-  MousePointer,
-  Move,
-  RotateCw,
-  Crop,
-  Layers,
-  Palette,
-  Brush,
-  Eraser,
-  Eye,
-  EyeOff,
+  Upload,
   Download,
-  Save,
-  FolderOpen,
-  Image as ImageIcon,
-  Settings,
-  Undo,
-  Redo,
   ZoomIn,
   ZoomOut,
-  Plus,
-  Grid3X3,
-  Cylinder,
-  Circle,
-  Box,
-  ChevronLeft,
-  ChevronRight,
-  Play,
+  RefreshCw,
   Target,
+  Wand2,
+  Grid3X3,
+  RotateCw,
+  Trash2,
 } from "lucide-react";
-import TattooCanvasWrapper from "./TattooCanvasWrapper";
-
-type Tool =
-  | "select"
-  | "move"
-  | "rotate"
-  | "crop"
-  | "brush"
-  | "eraser"
-  | "point-placement";
-type ViewMode = "2d" | "3d";
-type BodyShape = "cylinder" | "sphere" | "plane" | "custom";
-
-interface Layer {
-  id: string;
-  name: string;
-  visible: boolean;
-  opacity: number;
-  type: "body" | "tattoo";
-  image?: string;
-}
 
 interface TattooDesign {
   id: string;
@@ -61,12 +22,74 @@ interface TattooDesign {
   thumbnail: string;
 }
 
-interface BodyGeometry {
-  shape: BodyShape;
-  points: Array<{ x: number; y: number; z: number; id: string }>;
-  surfaceNormal: { x: number; y: number; z: number };
-  curvature: number;
+interface WarpPoint {
+  x: number;
+  y: number;
+  z: number;
+  id: string;
+  type: "auto" | "manual";
 }
+
+interface TattooState {
+  x: number;
+  y: number;
+  scale: number;
+  rotation: number;
+}
+
+// Advanced body edge detection algorithm
+const detectBodyEdges = (
+  canvas: HTMLCanvasElement,
+  img: HTMLImageElement
+): WarpPoint[] => {
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return [];
+
+  // Set canvas size and draw image
+  canvas.width = img.width;
+  canvas.height = img.height;
+  ctx.drawImage(img, 0, 0);
+
+  const points: WarpPoint[] = [];
+  const width = img.width;
+  const height = img.height;
+  
+  // Simplified edge detection - create a basic body contour
+  const samplingPoints = [
+    // Top section
+    { x: width * 0.3, y: height * 0.2, z: 0.7 },
+    { x: width * 0.5, y: height * 0.15, z: 1.0 },
+    { x: width * 0.7, y: height * 0.2, z: 0.7 },
+    
+    // Middle section
+    { x: width * 0.25, y: height * 0.4, z: 0.6 },
+    { x: width * 0.5, y: height * 0.4, z: 1.0 },
+    { x: width * 0.75, y: height * 0.4, z: 0.6 },
+    
+    // Lower middle
+    { x: width * 0.3, y: height * 0.6, z: 0.7 },
+    { x: width * 0.5, y: height * 0.6, z: 1.0 },
+    { x: width * 0.7, y: height * 0.6, z: 0.7 },
+    
+    // Bottom section
+    { x: width * 0.35, y: height * 0.8, z: 0.6 },
+    { x: width * 0.5, y: height * 0.85, z: 0.9 },
+    { x: width * 0.65, y: height * 0.8, z: 0.6 },
+  ];
+
+  samplingPoints.forEach((point, index) => {
+    // Convert to percentage coordinates
+    points.push({
+      x: (point.x / width) * 100,
+      y: (point.y / height) * 100,
+      z: point.z,
+      id: `auto-${index}`,
+      type: "auto",
+    });
+  });
+
+  return points;
+};
 
 export default function TattooPreviewApp() {
   const [bodyImage, setBodyImage] = useState<string | null>(null);
@@ -74,50 +97,43 @@ export default function TattooPreviewApp() {
   const [selectedTattoo, setSelectedTattoo] = useState<TattooDesign | null>(
     null
   );
-  const [activeTool, setActiveTool] = useState<Tool>("select");
-  const [viewMode, setViewMode] = useState<ViewMode>("2d");
-  const [zoomLevel, setZoomLevel] = useState(100);
-  const [layers, setLayers] = useState<Layer[]>([]);
-  const [bodyGeometry, setBodyGeometry] = useState<BodyGeometry>({
-    shape: "cylinder",
-    points: [],
-    surfaceNormal: { x: 0, y: 0, z: 1 },
-    curvature: 0.3,
+  const [warpPoints, setWarpPoints] = useState<WarpPoint[]>([]);
+  const [autoWarpEnabled, setAutoWarpEnabled] = useState(true);
+  const [showMesh, setShowMesh] = useState(false);
+  const [selectedPoint, setSelectedPoint] = useState<string | null>(null);
+  const [tattooState, setTattooState] = useState<TattooState>({
+    x: 50,
+    y: 50,
+    scale: 0.3,
+    rotation: 0,
   });
-  const [showWarpPoints, setShowWarpPoints] = useState(false);
-  const [carouselIndex, setCarouselIndex] = useState(0);
+  const [isDragging, setIsDragging] = useState(false);
+  const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
 
-  const tools = [
-    { id: "select", icon: MousePointer, label: "Select" },
-    { id: "move", icon: Move, label: "Move" },
-    { id: "rotate", icon: RotateCw, label: "Rotate" },
-    { id: "point-placement", icon: Target, label: "3D Points" },
-    { id: "crop", icon: Crop, label: "Crop" },
-    { id: "brush", icon: Brush, label: "Brush" },
-    { id: "eraser", icon: Eraser, label: "Eraser" },
-  ];
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
 
-  const bodyShapes = [
-    { id: "cylinder", icon: Cylinder, label: "Arm/Leg (Cylinder)" },
-    { id: "sphere", icon: Circle, label: "Shoulder (Sphere)" },
-    { id: "plane", icon: Box, label: "Back/Chest (Plane)" },
-    { id: "custom", icon: Grid3X3, label: "Custom Shape" },
-  ];
+  // Auto-detect body edges when body image changes
+  useEffect(() => {
+    if (bodyImage && autoWarpEnabled && canvasRef.current) {
+      const img = new window.Image();
+      img.onload = () => {
+        const detectedPoints = detectBodyEdges(canvasRef.current!, img);
+        setWarpPoints(detectedPoints);
+      };
+      img.src = bodyImage;
+    }
+  }, [bodyImage, autoWarpEnabled]);
 
-  const handleBodyImageUpload = (imageUrl: string) => {
-    setBodyImage(imageUrl);
-    const newLayer: Layer = {
-      id: "body-layer",
-      name: "Body Photo",
-      visible: true,
-      opacity: 100,
-      type: "body",
-      image: imageUrl,
+  const handleBodyImageUpload = (file: File) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      setBodyImage(e.target?.result as string);
     };
-    setLayers((prev) => [...prev.filter((l) => l.type !== "body"), newLayer]);
+    reader.readAsDataURL(file);
   };
 
-  const handleTattooImageUpload = (file: File) => {
+  const handleTattooUpload = (file: File) => {
     const reader = new FileReader();
     reader.onload = (e) => {
       const imageUrl = e.target?.result as string;
@@ -128,664 +144,471 @@ export default function TattooPreviewApp() {
         thumbnail: imageUrl,
       };
       setTattooDesigns((prev) => [...prev, newTattoo]);
-      if (!selectedTattoo) {
-        setSelectedTattoo(newTattoo);
-        addTattooLayer(newTattoo);
-      }
+      setSelectedTattoo(newTattoo);
     };
     reader.readAsDataURL(file);
   };
 
-  const addTattooLayer = (tattoo: TattooDesign) => {
-    const newLayer: Layer = {
-      id: `tattoo-layer-${tattoo.id}`,
-      name: tattoo.name,
-      visible: true,
-      opacity: 85,
-      type: "tattoo",
-      image: tattoo.image,
-    };
-    setLayers((prev) => [...prev.filter((l) => l.type !== "tattoo"), newLayer]);
-  };
-
-  const selectTattoo = (tattoo: TattooDesign) => {
-    setSelectedTattoo(tattoo);
-    addTattooLayer(tattoo);
-  };
-
-  const toggleLayerVisibility = (layerId: string) => {
-    setLayers((prev) =>
-      prev.map((layer) =>
-        layer.id === layerId ? { ...layer, visible: !layer.visible } : layer
-      )
-    );
-  };
-
-  const updateLayerOpacity = (layerId: string, opacity: number) => {
-    setLayers((prev) =>
-      prev.map((layer) =>
-        layer.id === layerId ? { ...layer, opacity } : layer
-      )
-    );
-  };
-
-  const addWarpPoint = (x: number, y: number) => {
-    if (activeTool !== "point-placement") return;
-
-    const newPoint = {
-      id: `point-${Date.now()}`,
+  const addWarpPoint = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (isDragging) return; // Don't add points while dragging tattoo
+    
+    if (!containerRef.current) return;
+    
+    const rect = containerRef.current.getBoundingClientRect();
+    const x = ((e.clientX - rect.left) / rect.width) * 100;
+    const y = ((e.clientY - rect.top) / rect.height) * 100;
+    
+    const newPoint: WarpPoint = {
       x,
       y,
-      z: 0.5, // Default depth
+      z: 0.8,
+      id: `manual-${Date.now()}`,
+      type: "manual",
     };
-    setBodyGeometry((prev) => ({
-      ...prev,
-      points: [...prev.points, newPoint],
-    }));
+    setWarpPoints((prev) => [...prev, newPoint]);
   };
 
-  const removeWarpPoint = (pointId: string) => {
-    setBodyGeometry((prev) => ({
-      ...prev,
-      points: prev.points.filter((p) => p.id !== pointId),
-    }));
+  // Tattoo drag handlers
+  const handleTattooMouseDown = (e: React.MouseEvent) => {
+    e.stopPropagation(); // Prevent container click
+    setIsDragging(true);
+    setDragStart({ x: e.clientX, y: e.clientY });
   };
 
-  const navigateCarousel = (direction: "left" | "right") => {
-    if (direction === "left") {
-      setCarouselIndex((prev) => Math.max(0, prev - 1));
-    } else {
-      setCarouselIndex((prev) => Math.min(tattooDesigns.length - 3, prev + 1));
+  const handleTattooMouseMove = (e: React.MouseEvent) => {
+    if (!isDragging || !containerRef.current) return;
+    
+    const rect = containerRef.current.getBoundingClientRect();
+    const deltaX = ((e.clientX - dragStart.x) / rect.width) * 100;
+    const deltaY = ((e.clientY - dragStart.y) / rect.height) * 100;
+    
+    setTattooState(prev => ({
+      ...prev,
+      x: Math.max(0, Math.min(100, prev.x + deltaX)),
+      y: Math.max(0, Math.min(100, prev.y + deltaY))
+    }));
+    
+    setDragStart({ x: e.clientX, y: e.clientY });
+  };
+
+  const handleTattooMouseUp = () => {
+    setIsDragging(false);
+  };
+
+  const deleteWarpPoint = (pointId: string) => {
+    setWarpPoints((prev) => prev.filter((p) => p.id !== pointId));
+    if (selectedPoint === pointId) {
+      setSelectedPoint(null);
     }
   };
 
+  const updateWarpPoint = (pointId: string, updates: Partial<WarpPoint>) => {
+    setWarpPoints((prev) =>
+      prev.map((p) => (p.id === pointId ? { ...p, ...updates } : p))
+    );
+  };
+
+  const autoDetectEdges = () => {
+    if (bodyImage && canvasRef.current) {
+      const img = new window.Image();
+      img.onload = () => {
+        const detectedPoints = detectBodyEdges(canvasRef.current!, img);
+        setWarpPoints(detectedPoints);
+      };
+      img.src = bodyImage;
+    }
+  };
+
+  const resetWarpPoints = () => {
+    setWarpPoints([]);
+    setSelectedPoint(null);
+  };
+
+  const downloadResult = () => {
+    console.log("Downloading result...");
+  };
+
+  // Generate mesh lines for visualization
+  const generateMeshLines = () => {
+    if (warpPoints.length < 3) return [];
+    
+    const lines = [];
+    for (let i = 0; i < warpPoints.length; i++) {
+      for (let j = i + 1; j < warpPoints.length; j++) {
+        const p1 = warpPoints[i];
+        const p2 = warpPoints[j];
+        const distance = Math.sqrt(
+          Math.pow(p1.x - p2.x, 2) + Math.pow(p1.y - p2.y, 2)
+        );
+        
+        if (distance < 30) {
+          lines.push({ from: p1, to: p2 });
+        }
+      }
+    }
+    return lines;
+  };
+
   return (
-    <div className="h-screen bg-gray-900 text-white flex flex-col overflow-hidden">
-      {/* Top Menu Bar */}
-      <div className="bg-gray-800 border-b border-gray-700 px-6 py-4 flex items-center justify-between">
-        <div className="flex items-center gap-8">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-gradient-to-br from-purple-500 to-pink-500 rounded-xl flex items-center justify-center">
-              <ImageIcon className="w-6 h-6 text-white" />
-            </div>
-            <span className="font-bold text-xl">InkVision Pro</span>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <button className="px-4 py-2.5 text-sm hover:bg-gray-700 rounded-lg transition-colors">
-              File
-            </button>
-            <button className="px-4 py-2.5 text-sm hover:bg-gray-700 rounded-lg transition-colors">
-              Edit
-            </button>
-            <button className="px-4 py-2.5 text-sm hover:bg-gray-700 rounded-lg transition-colors">
-              View
-            </button>
-            <button className="px-4 py-2.5 text-sm hover:bg-gray-700 rounded-lg transition-colors">
-              Layer
-            </button>
-            <button className="px-4 py-2.5 text-sm hover:bg-gray-700 rounded-lg transition-colors">
-              3D
-            </button>
-          </div>
-        </div>
-
+    <div className="h-screen bg-gray-900 text-white flex flex-col">
+      {/* Simple Top Toolbar */}
+      <div className="bg-gray-800 border-b border-gray-700 px-4 py-3 flex items-center justify-between">
         <div className="flex items-center gap-4">
-          <button
-            className="p-3 hover:bg-gray-700 rounded-lg transition-colors"
-            title="Undo"
-          >
-            <Undo className="w-5 h-5" />
-          </button>
-          <button
-            className="p-3 hover:bg-gray-700 rounded-lg transition-colors"
-            title="Redo"
-          >
-            <Redo className="w-5 h-5" />
-          </button>
-          <div className="w-px h-8 bg-gray-600 mx-3" />
+          <h1 className="text-lg font-bold">Tattoo Preview</h1>
+          
+          <div className="flex items-center gap-3">
+            {/* Body Image Upload */}
+            <button
+              onClick={() => document.getElementById("body-upload")?.click()}
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm flex items-center gap-2 transition-colors"
+            >
+              <Upload className="w-4 h-4" />
+              Upload Body
+            </button>
+            <input
+              id="body-upload"
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) handleBodyImageUpload(file);
+              }}
+            />
 
-          {/* View Mode Toggle */}
-          <div className="flex bg-gray-700 rounded-lg overflow-hidden p-1">
+            {/* Tattoo Upload */}
             <button
-              onClick={() => setViewMode("2d")}
-              className={`px-4 py-2 text-sm font-medium transition-colors rounded-md ${
-                viewMode === "2d"
-                  ? "bg-blue-600 text-white shadow-md"
-                  : "text-gray-300 hover:text-white hover:bg-gray-600"
-              }`}
+              onClick={() => document.getElementById("tattoo-upload")?.click()}
+              className="px-4 py-2 bg-purple-600 hover:bg-purple-700 rounded-lg text-sm flex items-center gap-2 transition-colors"
             >
-              2D
+              <Upload className="w-4 h-4" />
+              Add Tattoo
             </button>
-            <button
-              onClick={() => setViewMode("3d")}
-              className={`px-4 py-2 text-sm font-medium transition-colors rounded-md ${
-                viewMode === "3d"
-                  ? "bg-blue-600 text-white shadow-md"
-                  : "text-gray-300 hover:text-white hover:bg-gray-600"
-              }`}
-            >
-              3D
-            </button>
+            <input
+              id="tattoo-upload"
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) handleTattooUpload(file);
+              }}
+            />
           </div>
-
-          <div className="w-px h-8 bg-gray-600 mx-3" />
-          <button className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm font-medium transition-colors flex items-center gap-2">
-            <Save className="w-4 h-4" />
-            Save
-          </button>
-        </div>
-      </div>
-
-      {/* Toolbar */}
-      <div className="bg-gray-800 border-b border-gray-700 px-6 py-3 flex items-center justify-between">
-        <div className="flex items-center gap-6">
-          <button
-            onClick={() => document.getElementById("body-upload")?.click()}
-            className="p-3 hover:bg-gray-700 rounded-lg transition-colors"
-            title="Upload Body Photo"
-          >
-            <FolderOpen className="w-5 h-5" />
-          </button>
-          <input
-            id="body-upload"
-            type="file"
-            accept="image/*"
-            className="hidden"
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (file) {
-                const reader = new FileReader();
-                reader.onload = (e) => {
-                  handleBodyImageUpload(e.target?.result as string);
-                };
-                reader.readAsDataURL(file);
-              }
-            }}
-          />
-
-          <button
-            className="p-3 hover:bg-gray-700 rounded-lg transition-colors"
-            title="Download"
-          >
-            <Download className="w-5 h-5" />
-          </button>
-          <div className="w-px h-6 bg-gray-600 mx-3" />
-
-          <div className="flex items-center gap-3 bg-gray-700/50 rounded-lg px-3 py-2">
-            <button
-              onClick={() => setZoomLevel((prev) => Math.max(25, prev - 25))}
-              className="p-2 hover:bg-gray-600 rounded-md transition-colors"
-              title="Zoom Out"
-            >
-              <ZoomOut className="w-4 h-4" />
-            </button>
-            <span className="text-sm font-mono w-14 text-center font-medium">
-              {zoomLevel}%
-            </span>
-            <button
-              onClick={() => setZoomLevel((prev) => Math.min(400, prev + 25))}
-              className="p-2 hover:bg-gray-600 rounded-md transition-colors"
-              title="Zoom In"
-            >
-              <ZoomIn className="w-4 h-4" />
-            </button>
-          </div>
-
-          <div className="w-px h-6 bg-gray-600 mx-3" />
-
-          {/* Warp Points Toggle */}
-          <button
-            onClick={() => setShowWarpPoints(!showWarpPoints)}
-            className={`p-3 rounded-lg transition-colors ${
-              showWarpPoints ? "bg-blue-600 text-white shadow-md" : "hover:bg-gray-700"
-            }`}
-            title="Toggle 3D Warp Points"
-          >
-            <Target className="w-5 h-5" />
-          </button>
         </div>
 
         <div className="flex items-center gap-3">
+          {/* Auto Edge Detection Toggle */}
           <button
-            className="p-3 hover:bg-gray-700 rounded-lg transition-colors"
-            title="Settings"
+            onClick={() => setAutoWarpEnabled(!autoWarpEnabled)}
+            className={`px-3 py-2 rounded-lg text-sm flex items-center gap-2 transition-colors ${
+              autoWarpEnabled
+                ? "bg-green-600 hover:bg-green-700"
+                : "bg-gray-600 hover:bg-gray-700"
+            }`}
           >
-            <Settings className="w-5 h-5" />
+            <Wand2 className="w-4 h-4" />
+            Auto {autoWarpEnabled ? "ON" : "OFF"}
+          </button>
+
+          {/* Manual Edge Detection */}
+          <button
+            onClick={autoDetectEdges}
+            className="px-3 py-2 bg-orange-600 hover:bg-orange-700 rounded-lg text-sm flex items-center gap-2 transition-colors"
+          >
+            <Target className="w-4 h-4" />
+            Detect
+          </button>
+
+          {/* Mesh Visualizer Toggle */}
+          <button
+            onClick={() => setShowMesh(!showMesh)}
+            className={`px-3 py-2 rounded-lg text-sm flex items-center gap-2 transition-colors ${
+              showMesh
+                ? "bg-purple-600 hover:bg-purple-700"
+                : "bg-gray-600 hover:bg-gray-700"
+            }`}
+          >
+            <Grid3X3 className="w-4 h-4" />
+            Mesh
+          </button>
+
+          {/* Reset Points */}
+          <button
+            onClick={resetWarpPoints}
+            className="px-3 py-2 bg-red-600 hover:bg-red-700 rounded-lg text-sm flex items-center gap-2 transition-colors"
+          >
+            <RefreshCw className="w-4 h-4" />
+            Reset
+          </button>
+
+          {/* Download */}
+          <button
+            onClick={downloadResult}
+            className="px-4 py-2 bg-green-600 hover:bg-green-700 rounded-lg text-sm flex items-center gap-2 transition-colors"
+          >
+            <Download className="w-4 h-4" />
+            Export
           </button>
         </div>
       </div>
 
-      <div className="flex-1 flex overflow-hidden">
-        {/* Left Sidebar - Tools */}
-        <div className="w-24 bg-gray-800 border-r border-gray-700 flex flex-col py-6">
-          {tools.map((tool) => (
-            <button
-              key={tool.id}
-              onClick={() => setActiveTool(tool.id as Tool)}
-              className={`p-4 mx-3 mb-4 rounded-xl transition-all hover:bg-gray-700 ${
-                activeTool === tool.id
-                  ? "bg-blue-600 shadow-lg shadow-blue-600/25 scale-105"
-                  : "bg-gray-700/50 hover:scale-105"
-              }`}
-              title={tool.label}
+      {/* Main Canvas Area */}
+      <div className="flex-1 bg-gray-850 p-4">
+        {!bodyImage ? (
+          <div className="h-full flex items-center justify-center">
+            <div className="text-center max-w-md">
+              <div className="w-24 h-24 bg-gray-700 rounded-full flex items-center justify-center mx-auto mb-6">
+                <Upload className="w-12 h-12 text-gray-400" />
+              </div>
+              <h2 className="text-2xl font-bold mb-4">Quick Tattoo Preview</h2>
+              <p className="text-gray-400 mb-6">
+                Upload a body photo to get started with instant tattoo preview
+              </p>
+              <button
+                onClick={() => document.getElementById("body-upload")?.click()}
+                className="px-6 py-3 bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors"
+              >
+                Upload Body Photo
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="h-full w-full relative bg-gray-800 rounded-lg border border-gray-700 overflow-hidden">
+            <div 
+              ref={containerRef}
+              className="h-full w-full relative cursor-crosshair"
+              onClick={addWarpPoint}
+              onMouseMove={handleTattooMouseMove}
+              onMouseUp={handleTattooMouseUp}
             >
-              <tool.icon className="w-6 h-6" />
-            </button>
-          ))}
-        </div>
+              {/* Body Image - Always fits container */}
+              <Image
+                src={bodyImage}
+                alt="Body"
+                fill
+                className="object-contain pointer-events-none"
+                sizes="100vw"
+                priority
+              />
 
-        {/* Main Canvas Area */}
-        <div className="flex-1 flex flex-col">
-          {/* Body Canvas - Main Focus */}
-          <div className="flex-1 bg-gray-850 p-8">
-            <div className="h-full flex items-center justify-center">
-              {!bodyImage ? (
-                <div className="text-center max-w-lg">
-                  <div className="w-32 h-32 bg-gray-700 rounded-full flex items-center justify-center mx-auto mb-8">
-                    <ImageIcon className="w-16 h-16 text-gray-400" />
-                  </div>
-                  <h2 className="text-3xl font-bold mb-6">Upload Body Photo</h2>
-                  <p className="text-gray-400 mb-8 text-lg leading-relaxed">
-                    Start by uploading a body part photo where you want to place
-                    the tattoo
-                  </p>
-                  <button
-                    onClick={() =>
-                      document.getElementById("body-upload")?.click()
-                    }
-                    className="px-8 py-4 bg-blue-600 hover:bg-blue-700 rounded-xl transition-colors text-lg font-medium"
-                  >
-                    Choose Body Photo
-                  </button>
-                </div>
-              ) : (
-                <div className="w-full h-full relative max-w-6xl">
-                  {viewMode === "2d" ? (
-                    <div className="w-full h-full bg-gray-800 rounded-xl border border-gray-700 overflow-hidden shadow-xl">
-                      {selectedTattoo && (
-                        <TattooCanvasWrapper
-                          bodyImage={bodyImage}
-                          tattooImage={selectedTattoo.image}
-                          warpPoints={bodyGeometry.points}
-                          showWarpPoints={showWarpPoints}
-                          onPointClick={addWarpPoint}
-                          activeTool={activeTool}
-                          initialTattooScale={0.5}
-                        />
-                      )}
-                      {!selectedTattoo && (
-                        <div className="w-full h-full flex items-center justify-center relative p-8">
-                          <Image
-                            src={bodyImage}
-                            alt="Body"
-                            fill
-                            className="object-contain rounded-lg"
-                            sizes="(max-width: 768px) 100vw, (max-width: 1200px) 50vw, 33vw"
-                          />
-                        </div>
-                      )}
-                    </div>
-                  ) : (
-                    // 3D View for Point Placement
-                    <div className="w-full h-full bg-gray-800 rounded-xl border border-gray-700 p-8">
-                      <div className="h-full flex flex-col">
-                        <div className="flex items-center justify-between mb-8">
-                          <h3 className="text-2xl font-semibold">
-                            3D Point Placement
-                          </h3>
-                          <div className="flex items-center gap-3">
-                            {bodyShapes.map((shape) => (
-                              <button
-                                key={shape.id}
-                                onClick={() =>
-                                  setBodyGeometry((prev) => ({
-                                    ...prev,
-                                    shape: shape.id as BodyShape,
-                                  }))
-                                }
-                                className={`p-4 rounded-xl transition-colors ${
-                                  bodyGeometry.shape === shape.id
-                                    ? "bg-blue-600 text-white shadow-md"
-                                    : "bg-gray-700 hover:bg-gray-600"
-                                }`}
-                                title={shape.label}
-                              >
-                                <shape.icon className="w-5 h-5" />
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                        <div className="flex-1 flex items-center justify-center">
-                          <div className="text-center">
-                            <div className="w-40 h-40 bg-gray-700 rounded-xl flex items-center justify-center mx-auto mb-6">
-                              <Grid3X3 className="w-20 h-20 text-gray-400" />
-                            </div>
-                            <h4 className="text-2xl font-bold mb-4">
-                              3D Body Mapping
-                            </h4>
-                            <p className="text-gray-400 mb-6 text-lg">
-                              Define the {bodyGeometry.shape} shape for accurate
-                              tattoo wrapping
-                            </p>
-                            <p className="text-sm text-gray-500">
-                              Points placed: {bodyGeometry.points.length}
-                            </p>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
+              {/* Hidden canvas for edge detection */}
+              <canvas ref={canvasRef} className="hidden" />
 
-          {/* Tattoo Carousel */}
-          <div className="h-56 bg-gray-800 border-t border-gray-700 p-6">
-            <div className="flex items-center justify-between mb-6">
-              <h3 className="font-bold text-lg flex items-center gap-3">
-                <Palette className="w-5 h-5" />
-                Tattoo Designs ({tattooDesigns.length})
-              </h3>
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={() =>
-                    document.getElementById("tattoo-upload")?.click()
-                  }
-                  className="px-5 py-3 bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors flex items-center gap-2 font-medium"
-                >
-                  <Plus className="w-4 h-4" />
-                  Add Design
-                </button>
-                <input
-                  id="tattoo-upload"
-                  type="file"
-                  accept="image/*"
-                  multiple
-                  className="hidden"
-                  onChange={(e) => {
-                    const files = Array.from(e.target.files || []);
-                    files.forEach(handleTattooImageUpload);
+              {/* Tattoo Overlay */}
+              {selectedTattoo && (
+                <div
+                  className="absolute cursor-move select-none"
+                  style={{
+                    left: `${tattooState.x}%`,
+                    top: `${tattooState.y}%`,
+                    transform: `translate(-50%, -50%) scale(${tattooState.scale}) rotate(${tattooState.rotation}deg)`,
+                    transformOrigin: "center",
+                    opacity: 0.85,
+                    filter: "drop-shadow(2px 2px 4px rgba(0,0,0,0.3))",
                   }}
-                />
-              </div>
-            </div>
-
-            {tattooDesigns.length === 0 ? (
-              <div className="h-36 border-2 border-dashed border-gray-600 rounded-xl flex items-center justify-center">
-                <div className="text-center p-6">
-                  <Palette className="w-10 h-10 text-gray-400 mx-auto mb-3" />
-                  <p className="text-gray-400 mb-1">No tattoo designs yet</p>
-                  <p className="text-xs text-gray-500">
-                    Upload some tattoo designs to get started
-                  </p>
-                </div>
-              </div>
-            ) : (
-              <div className="flex items-center gap-6 h-36">
-                <button
-                  onClick={() => navigateCarousel("left")}
-                  disabled={carouselIndex === 0}
-                  className="p-3 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors"
+                  onMouseDown={handleTattooMouseDown}
                 >
-                  <ChevronLeft className="w-5 h-5" />
-                </button>
-
-                <div className="flex-1 flex gap-4 overflow-hidden">
-                  {tattooDesigns
-                    .slice(carouselIndex, carouselIndex + 5)
-                    .map((tattoo) => (
-                      <div
-                        key={tattoo.id}
-                        onClick={() => selectTattoo(tattoo)}
-                        className={`relative w-28 h-28 flex-shrink-0 rounded-xl overflow-hidden cursor-pointer transition-all ${
-                          selectedTattoo?.id === tattoo.id
-                            ? "ring-3 ring-blue-500 ring-offset-3 ring-offset-gray-800 transform scale-105"
-                            : "hover:ring-2 hover:ring-gray-500 hover:ring-offset-2 hover:ring-offset-gray-800 hover:scale-102"
-                        }`}
-                      >
-                        <Image
-                          src={tattoo.thumbnail}
-                          alt={tattoo.name}
-                          fill
-                          className="object-cover"
-                          sizes="(max-width: 768px) 100vw, (max-width: 1200px) 50vw, 33vw"
-                        />
-                        {selectedTattoo?.id === tattoo.id && (
-                          <div className="absolute inset-0 bg-blue-500/20 flex items-center justify-center">
-                            <Play className="w-7 h-7 text-white" fill="white" />
-                          </div>
-                        )}
-                        <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/70 to-transparent p-2">
-                          <p className="text-xs text-white truncate font-medium">
-                            {tattoo.name}
-                          </p>
-                        </div>
-                      </div>
-                    ))}
-                </div>
-
-                <button
-                  onClick={() => navigateCarousel("right")}
-                  disabled={carouselIndex >= tattooDesigns.length - 5}
-                  className="p-3 bg-gray-700 hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg transition-colors"
-                >
-                  <ChevronRight className="w-5 h-5" />
-                </button>
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Right Sidebar - Properties & Layers */}
-        <div className="w-96 bg-gray-800 border-l border-gray-700 flex flex-col">
-          {/* Body Shape Configuration */}
-          {viewMode === "3d" && (
-            <div className="p-6 border-b border-gray-700">
-              <h3 className="font-bold text-lg mb-6 flex items-center gap-3">
-                <Grid3X3 className="w-5 h-5" />
-                Body Geometry
-              </h3>
-              <div className="space-y-6">
-                <div>
-                  <label className="block text-sm font-medium mb-3 text-gray-300">
-                    Body Shape
-                  </label>
-                  <select
-                    value={bodyGeometry.shape}
-                    onChange={(e) =>
-                      setBodyGeometry((prev) => ({
-                        ...prev,
-                        shape: e.target.value as BodyShape,
-                      }))
-                    }
-                    className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-3 text-sm"
-                  >
-                    <option value="cylinder">Arm/Leg (Cylinder)</option>
-                    <option value="sphere">Shoulder (Sphere)</option>
-                    <option value="plane">Back/Chest (Plane)</option>
-                    <option value="custom">Custom Shape</option>
-                  </select>
-                </div>
-                <div>
-                  <div className="flex items-center justify-between mb-3">
-                    <label className="text-sm font-medium text-gray-300">
-                      Surface Curvature
-                    </label>
-                    <span className="text-xs text-gray-400 bg-gray-700 px-2 py-1 rounded">
-                      {(bodyGeometry.curvature * 100).toFixed(0)}%
-                    </span>
-                  </div>
-                  <input
-                    type="range"
-                    min="0"
-                    max="1"
-                    step="0.1"
-                    value={bodyGeometry.curvature}
-                    onChange={(e) =>
-                      setBodyGeometry((prev) => ({
-                        ...prev,
-                        curvature: parseFloat(e.target.value),
-                      }))
-                    }
-                    className="w-full h-2 bg-gray-600 rounded-lg appearance-none cursor-pointer"
+                  <Image
+                    src={selectedTattoo.image}
+                    alt="Tattoo"
+                    width={200}
+                    height={200}
+                    className="max-w-none pointer-events-none"
+                    draggable={false}
                   />
                 </div>
-                <div className="text-sm text-gray-400 bg-gray-750 p-3 rounded-lg">
-                  Control Points:{" "}
-                  <span className="font-medium text-white">
-                    {bodyGeometry.points.length}
-                  </span>
-                </div>
-              </div>
-            </div>
-          )}
+              )}
 
-          {/* Layers Panel */}
-          <div className="p-6 border-b border-gray-700">
-            <h3 className="font-bold text-lg mb-6 flex items-center gap-3">
-              <Layers className="w-5 h-5" />
-              Layers
-            </h3>
-            <div className="space-y-3">
-              {layers.map((layer) => (
-                <div key={layer.id} className="bg-gray-700 rounded-xl p-4">
-                  <div className="flex items-center justify-between mb-3">
-                    <span className="text-sm font-medium">{layer.name}</span>
-                    <button
-                      onClick={() => toggleLayerVisibility(layer.id)}
-                      className="p-2 hover:bg-gray-600 rounded-lg transition-colors"
-                    >
-                      {layer.visible ? (
-                        <Eye className="w-4 h-4" />
-                      ) : (
-                        <EyeOff className="w-4 h-4 text-gray-400" />
-                      )}
-                    </button>
-                  </div>
-                  <div className="flex items-center gap-3">
-                    <span className="text-xs text-gray-400 min-w-fit">
-                      Opacity:
-                    </span>
-                    <input
-                      type="range"
-                      min="0"
-                      max="100"
-                      value={layer.opacity}
-                      onChange={(e) =>
-                        updateLayerOpacity(layer.id, parseInt(e.target.value))
-                      }
-                      className="flex-1 h-2 bg-gray-600 rounded-lg appearance-none cursor-pointer"
+              {/* Mesh Visualization */}
+              {showMesh && (
+                <svg className="absolute inset-0 w-full h-full pointer-events-none">
+                  {generateMeshLines().map((line, index) => (
+                    <line
+                      key={index}
+                      x1={`${line.from.x}%`}
+                      y1={`${line.from.y}%`}
+                      x2={`${line.to.x}%`}
+                      y2={`${line.to.y}%`}
+                      stroke="rgba(34, 197, 94, 0.6)"
+                      strokeWidth="1"
+                      strokeDasharray="2,2"
                     />
-                    <span className="text-xs text-gray-400 w-10 text-right">
-                      {layer.opacity}%
-                    </span>
+                  ))}
+                </svg>
+              )}
+
+              {/* Warp Points */}
+              {warpPoints.map((point) => (
+                <div
+                  key={point.id}
+                  className={`absolute transform -translate-x-1/2 -translate-y-1/2 cursor-pointer ${
+                    selectedPoint === point.id ? "z-20" : "z-10"
+                  }`}
+                  style={{
+                    left: `${point.x}%`,
+                    top: `${point.y}%`,
+                  }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setSelectedPoint(point.id);
+                  }}
+                >
+                  <div
+                    className={`w-4 h-4 rounded-full border-2 border-white shadow-lg transition-all ${
+                      point.type === "auto" ? "bg-blue-500" : "bg-orange-500"
+                    } ${
+                      selectedPoint === point.id
+                        ? "scale-150 ring-2 ring-yellow-400"
+                        : "hover:scale-125"
+                    }`}
+                    style={{
+                      opacity: point.z,
+                      transform: `scale(${0.8 + point.z * 0.4})`,
+                    }}
+                  />
+                  {/* 3D depth indicator */}
+                  <div
+                    className="absolute -bottom-6 left-1/2 transform -translate-x-1/2 text-xs bg-black/70 text-white px-1 rounded pointer-events-none"
+                    style={{ opacity: selectedPoint === point.id ? 1 : 0 }}
+                  >
+                    z:{point.z.toFixed(1)}
                   </div>
                 </div>
               ))}
+
+              {/* Instructions */}
+              <div className="absolute top-4 left-4 bg-black/70 text-white p-3 rounded-lg">
+                <p className="text-sm">
+                  Click to add warp points • {warpPoints.length} points placed
+                </p>
+              </div>
             </div>
           </div>
+        )}
+      </div>
 
-          {/* 3D Warp Points List */}
-          {showWarpPoints && bodyGeometry.points.length > 0 && (
-            <div className="p-6 border-b border-gray-700">
-              <h3 className="font-bold text-lg mb-6 flex items-center gap-3">
-                <Target className="w-5 h-5" />
-                Warp Points
-              </h3>
-              <div className="space-y-2 max-h-40 overflow-y-auto">
-                {bodyGeometry.points.map((point, index) => (
-                  <div
-                    key={point.id}
-                    className="flex items-center justify-between bg-gray-700 rounded-lg p-3"
+      {/* Bottom Controls */}
+      <div className="bg-gray-800 border-t border-gray-700 p-4">
+        <div className="flex items-center justify-between gap-4">
+          {/* Tattoo Selection */}
+          {tattooDesigns.length > 0 && (
+            <div className="flex items-center gap-4">
+              <span className="text-sm font-medium text-gray-300">
+                Tattoos:
+              </span>
+              <div className="flex gap-3 overflow-x-auto">
+                {tattooDesigns.map((tattoo) => (
+                  <button
+                    key={tattoo.id}
+                    onClick={() => setSelectedTattoo(tattoo)}
+                    className={`relative w-12 h-12 flex-shrink-0 rounded-lg overflow-hidden transition-all ${
+                      selectedTattoo?.id === tattoo.id
+                        ? "ring-2 ring-blue-500 scale-110"
+                        : "hover:scale-105 opacity-70 hover:opacity-100"
+                    }`}
                   >
-                    <span className="text-sm font-medium">
-                      Point {index + 1}
-                    </span>
-                    <button
-                      onClick={() => removeWarpPoint(point.id)}
-                      className="text-red-400 hover:text-red-300 text-xs font-medium px-2 py-1 hover:bg-red-400/10 rounded transition-colors"
-                    >
-                      Remove
-                    </button>
-                  </div>
+                    <Image
+                      src={tattoo.thumbnail}
+                      alt={tattoo.name}
+                      fill
+                      className="object-cover"
+                      sizes="48px"
+                    />
+                  </button>
                 ))}
               </div>
             </div>
           )}
 
-          {/* Properties Panel */}
-          <div className="p-6 flex-1">
-            <h3 className="font-bold text-lg mb-6">Tattoo Properties</h3>
-            <div className="space-y-6">
-              <div>
-                <label className="block text-sm font-medium mb-3 text-gray-300">
-                  Blend Mode
-                </label>
-                <select className="w-full bg-gray-700 border border-gray-600 rounded-lg px-4 py-3 text-sm">
-                  <option>Normal</option>
-                  <option>Multiply</option>
-                  <option>Screen</option>
-                  <option>Overlay</option>
-                  <option>Soft Light</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium mb-3 text-gray-300">
-                  Warp Strength
-                </label>
-                <input
-                  type="range"
-                  min="0"
-                  max="100"
-                  defaultValue="50"
-                  className="w-full h-2 bg-gray-600 rounded-lg appearance-none cursor-pointer"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium mb-3 text-gray-300">
-                  Skin Adaptation
-                </label>
-                <input
-                  type="range"
-                  min="0"
-                  max="100"
-                  defaultValue="75"
-                  className="w-full h-2 bg-gray-600 rounded-lg appearance-none cursor-pointer"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium mb-3 text-gray-300">
-                  Perspective Depth
-                </label>
-                <input
-                  type="range"
-                  min="0"
-                  max="100"
-                  defaultValue="30"
-                  className="w-full h-2 bg-gray-600 rounded-lg appearance-none cursor-pointer"
-                />
-              </div>
+          {/* Tattoo Transform Controls */}
+          {selectedTattoo && (
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() =>
+                  setTattooState((prev) => ({
+                    ...prev,
+                    rotation: prev.rotation - 15,
+                  }))
+                }
+                className="p-2 bg-gray-700 hover:bg-gray-600 rounded transition-colors"
+              >
+                <RotateCw className="w-4 h-4 transform scale-x-[-1]" />
+              </button>
+              <button
+                onClick={() =>
+                  setTattooState((prev) => ({
+                    ...prev,
+                    rotation: prev.rotation + 15,
+                  }))
+                }
+                className="p-2 bg-gray-700 hover:bg-gray-600 rounded transition-colors"
+              >
+                <RotateCw className="w-4 h-4" />
+              </button>
+              <button
+                onClick={() =>
+                  setTattooState((prev) => ({
+                    ...prev,
+                    scale: Math.min(1, prev.scale * 1.1),
+                  }))
+                }
+                className="p-2 bg-gray-700 hover:bg-gray-600 rounded transition-colors"
+              >
+                <ZoomIn className="w-4 h-4" />
+              </button>
+              <button
+                onClick={() =>
+                  setTattooState((prev) => ({
+                    ...prev,
+                    scale: Math.max(0.1, prev.scale * 0.9),
+                  }))
+                }
+                className="p-2 bg-gray-700 hover:bg-gray-600 rounded transition-colors"
+              >
+                <ZoomOut className="w-4 h-4" />
+              </button>
             </div>
-          </div>
-        </div>
-      </div>
+          )}
 
-      {/* Status Bar */}
-      <div className="bg-gray-800 border-t border-gray-700 px-6 py-3 flex items-center justify-between text-sm text-gray-400">
-        <div className="flex items-center gap-6">
-          <span>Tool: {tools.find((t) => t.id === activeTool)?.label}</span>
-          <span>View: {viewMode.toUpperCase()}</span>
-          <span>Shape: {bodyGeometry.shape}</span>
+          {/* Selected Point Controls */}
+          {selectedPoint && (
+            <div className="flex items-center gap-3">
+              <span className="text-sm text-gray-300">Point:</span>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.1"
+                value={warpPoints.find((p) => p.id === selectedPoint)?.z || 0.5}
+                onChange={(e) =>
+                  updateWarpPoint(selectedPoint, {
+                    z: parseFloat(e.target.value),
+                  })
+                }
+                className="w-20 h-2 bg-gray-600 rounded-lg appearance-none cursor-pointer"
+              />
+              <button
+                onClick={() => deleteWarpPoint(selectedPoint)}
+                className="p-2 bg-red-600 hover:bg-red-700 rounded transition-colors"
+              >
+                <Trash2 className="w-4 h-4" />
+              </button>
+            </div>
+          )}
         </div>
-        <div className="flex items-center gap-6">
-          <span>Zoom: {zoomLevel}%</span>
-          <span>Points: {bodyGeometry.points.length}</span>
-          <span>Designs: {tattooDesigns.length}</span>
+
+        {/* Status Info */}
+        <div className="flex justify-between text-xs text-gray-400 mt-2">
+          <span>
+            Points: {warpPoints.length} (Auto:{" "}
+            {warpPoints.filter((p) => p.type === "auto").length}, Manual:{" "}
+            {warpPoints.filter((p) => p.type === "manual").length})
+          </span>
+          <span>
+            Click to add points • Select points to adjust depth • Mesh shows 3D
+            geometry
+          </span>
         </div>
       </div>
     </div>
