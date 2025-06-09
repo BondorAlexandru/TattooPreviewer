@@ -20,6 +20,8 @@ interface TattooCanvasProps {
   onWarpPointsUpdate: (points: WarpPoint[]) => void;
   onCanvasClick: (x: number, y: number) => void;
   onBodyImageUpdate: (bodyImage: BodyImageState) => void;
+  selectedWarpPoint: string | null;
+  onSelectedWarpPointChange: (pointId: string | null) => void;
   className?: string;
 }
 

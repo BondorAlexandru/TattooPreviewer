@@ -7,12 +7,11 @@ import { KonvaEventObject } from 'konva/lib/Node';
 import { 
   WarpPoint, 
   TattooState, 
-  BodyImageState, 
-  MeshTriangle 
+  BodyImageState
 } from '@/types';
 import { 
-  generateDelaunayTriangulation,
-  applyWarpTransformation,
+  calculateTerrainTransform,
+  generateTerrainMesh,
   autoDetectWarpPoints
 } from '@/utils/warpAlgorithms';
 import { 
@@ -33,6 +32,8 @@ interface KonvaCanvasRendererProps {
   onWarpPointsUpdate: (points: WarpPoint[]) => void;
   onCanvasClick: (x: number, y: number) => void;
   onBodyImageUpdate: (bodyImage: BodyImageState) => void;
+  selectedWarpPoint: string | null;
+  onSelectedWarpPointChange: (pointId: string | null) => void;
   className?: string;
 }
 
@@ -48,6 +49,8 @@ export default function KonvaCanvasRenderer({
   onWarpPointsUpdate,
   onCanvasClick,
   onBodyImageUpdate,
+  selectedWarpPoint,
+  onSelectedWarpPointChange,
   className
 }: KonvaCanvasRendererProps) {
   const stageRef = useRef<Konva.Stage>(null);
@@ -57,10 +60,18 @@ export default function KonvaCanvasRenderer({
   const [stageSize, setStageSize] = useState({ width: 800, height: 600 });
   const [bodyImageObj, setBodyImageObj] = useState<HTMLImageElement | null>(null);
   const [tattooImageObj, setTattooImageObj] = useState<HTMLImageElement | null>(null);
-  const [meshTriangles, setMeshTriangles] = useState<MeshTriangle[]>([]);
+  const [terrainMesh, setTerrainMesh] = useState<{ points: number[]; colors: string[] }>({ points: [], colors: [] });
   const [isDragging, setIsDragging] = useState(false);
   const [dragTarget, setDragTarget] = useState<'tattoo' | 'warpPoint' | null>(null);
-  const [selectedWarpPoint, setSelectedWarpPoint] = useState<string | null>(null);
+
+  // Force re-render when effects change
+  const [effectsKey, setEffectsKey] = useState(0);
+
+  useEffect(() => {
+    if (tattoo) {
+      setEffectsKey(prev => prev + 1);
+    }
+  }, [tattoo?.brightness, tattoo?.contrast, tattoo?.saturation, tattoo?.hue, tattoo?.blur]);
 
   // Load body image
   useEffect(() => {
@@ -99,6 +110,7 @@ export default function KonvaCanvasRenderer({
       img.crossOrigin = 'anonymous';
       img.onload = () => {
         setTattooImageObj(img);
+        setEffectsKey(prev => prev + 1); // Force effects refresh
       };
       img.src = tattoo.imageUrl;
     } else {
@@ -106,15 +118,38 @@ export default function KonvaCanvasRenderer({
     }
   }, [tattoo?.imageUrl]);
 
-  // Update mesh triangulation when warp points change
+  // Update terrain mesh when warp points change
   useEffect(() => {
-    if (warpPoints.length >= 3) {
-      const triangles = generateDelaunayTriangulation(warpPoints);
-      setMeshTriangles(triangles);
+    if (warpPoints.length >= 1) {
+      const mesh = generateTerrainMesh(warpPoints, 15);
+      setTerrainMesh(mesh);
     } else {
-      setMeshTriangles([]);
+      setTerrainMesh({ points: [], colors: [] });
     }
   }, [warpPoints]);
+
+  // Handle warp point selection and management
+  const handleWarpPointClick = useCallback((pointId: string, e: any) => {
+    e.cancelBubble = true;
+    onSelectedWarpPointChange(selectedWarpPoint === pointId ? null : pointId);
+  }, [selectedWarpPoint, onSelectedWarpPointChange]);
+
+  const addWarpPoint = useCallback((x: number, y: number) => {
+    const newWarpPoint: WarpPoint = {
+      id: generateId(),
+      x: clamp(x / stageSize.width, 0, 1),
+      y: clamp(y / stageSize.height, 0, 1),
+      z: 0.5
+    };
+    onWarpPointsUpdate([...warpPoints, newWarpPoint]);
+    onSelectedWarpPointChange(newWarpPoint.id);
+  }, [warpPoints, stageSize, onWarpPointsUpdate, onSelectedWarpPointChange]);
+
+  const removeWarpPoint = useCallback((pointId: string) => {
+    const updatedPoints = warpPoints.filter(p => p.id !== pointId);
+    onWarpPointsUpdate(updatedPoints);
+    onSelectedWarpPointChange(null);
+  }, [warpPoints, onWarpPointsUpdate, onSelectedWarpPointChange]);
 
   // Auto-detect warp points when body image changes
   const handleAutoDetectWarpPoints = useCallback(async () => {
@@ -131,53 +166,28 @@ export default function KonvaCanvasRenderer({
       }));
       
       onWarpPointsUpdate(newWarpPoints);
+      onSelectedWarpPointChange(null);
     } catch (error) {
       console.error('Failed to auto-detect warp points:', error);
     }
-  }, [bodyImage?.imageUrl, onWarpPointsUpdate]);
-
-  // Debounced canvas resize handler
-  const handleResize = useCallback(
-    debounce(() => {
-      const container = stageRef.current?.container();
-      if (container) {
-        const { offsetWidth, offsetHeight } = container.parentElement!;
-        setStageSize({
-          width: offsetWidth,
-          height: offsetHeight
-        });
-      }
-    }, 100),
-    []
-  );
+  }, [bodyImage?.imageUrl, onWarpPointsUpdate, onSelectedWarpPointChange]);
 
   // Handle stage click for adding warp points or selecting tattoo
-  const handleStageClick = useCallback((e: KonvaEventObject<MouseEvent>) => {
+  const handleStageClick = useCallback((e: any) => {
     const clickedOnEmpty = e.target === e.target.getStage();
     
     if (clickedOnEmpty) {
       const pos = e.target.getStage()!.getPointerPosition()!;
-      const relativePos = {
-        x: pos.x / stageSize.width,
-        y: pos.y / stageSize.height
-      };
       
       // Add warp point if holding Shift
       if (e.evt.shiftKey && bodyImage) {
-        const newWarpPoint: WarpPoint = {
-          id: generateId(),
-          x: clamp(relativePos.x, 0, 1),
-          y: clamp(relativePos.y, 0, 1),
-          z: 0.5 // Default depth
-        };
-        
-        onWarpPointsUpdate([...warpPoints, newWarpPoint]);
+        addWarpPoint(pos.x, pos.y);
       } else {
         onCanvasClick(pos.x, pos.y);
-        setSelectedWarpPoint(null);
+        onSelectedWarpPointChange(null);
       }
     }
-  }, [stageSize, bodyImage, warpPoints, onWarpPointsUpdate, onCanvasClick]);
+  }, [bodyImage, addWarpPoint, onCanvasClick, onSelectedWarpPointChange]);
 
   // Handle tattoo drag
   const handleTattooDragStart = useCallback(() => {
@@ -203,13 +213,7 @@ export default function KonvaCanvasRenderer({
   }, [tattoo, stageSize, onTattooUpdate]);
 
   // Handle warp point drag
-  const handleWarpPointDragStart = useCallback((pointId: string) => {
-    setIsDragging(true);
-    setDragTarget('warpPoint');
-    setSelectedWarpPoint(pointId);
-  }, []);
-
-  const handleWarpPointDragEnd = useCallback((e: KonvaEventObject<DragEvent>, pointId: string) => {
+  const handleWarpPointDragEnd = useCallback((e: any, pointId: string) => {
     setIsDragging(false);
     setDragTarget(null);
     
@@ -228,74 +232,125 @@ export default function KonvaCanvasRenderer({
     onWarpPointsUpdate(updatedWarpPoints);
   }, [warpPoints, stageSize, onWarpPointsUpdate]);
 
-  // Calculate tattoo transformation with warping
+  // Calculate tattoo transformation with TERRAIN-BASED warping
   const getTattooTransform = useCallback(() => {
-    if (!tattoo || !isWarpingEnabled || warpPoints.length < 3) {
+    if (!tattoo) {
       return {
-        x: (tattoo?.position.x || 0) * stageSize.width,
-        y: (tattoo?.position.y || 0) * stageSize.height,
-        scaleX: tattoo?.scale || 1,
-        scaleY: tattoo?.scale || 1,
-        rotation: tattoo?.rotation || 0,
-        skewX: tattoo?.skew.x || 0,
-        skewY: tattoo?.skew.y || 0
+        x: 0,
+        y: 0,
+        scaleX: 1,
+        scaleY: 1,
+        rotation: 0,
+        skewX: 0,
+        skewY: 0
       };
     }
 
-    const warpResult = applyWarpTransformation(
-      tattoo.position,
-      warpPoints,
-      warpStrength
-    );
-
-    return {
-      x: warpResult.x * stageSize.width,
-      y: warpResult.y * stageSize.height,
-      scaleX: (tattoo.scale || 1) * warpResult.scale,
-      scaleY: (tattoo.scale || 1) * warpResult.scale,
+    let transform = {
+      x: tattoo.position.x * stageSize.width,
+      y: tattoo.position.y * stageSize.height,
+      scaleX: tattoo.scale || 1,
+      scaleY: tattoo.scale || 1,
       rotation: tattoo.rotation || 0,
       skewX: tattoo.skew.x || 0,
       skewY: tattoo.skew.y || 0
     };
+
+    // Apply terrain warping if enabled
+    if (isWarpingEnabled && warpPoints.length >= 1 && warpStrength > 0) {
+      try {
+        const terrainTransform = calculateTerrainTransform(
+          tattoo.position,
+          { width: 0.2, height: 0.2 }, // Approximate tattoo size in normalized coords
+          warpPoints,
+          warpStrength
+        );
+
+        // Apply terrain transformation
+        transform.scaleX *= terrainTransform.scaleX;
+        transform.scaleY *= terrainTransform.scaleY;
+        transform.skewX += terrainTransform.skewX;
+        transform.skewY += terrainTransform.skewY;
+        transform.x += terrainTransform.offsetX;
+        transform.y += terrainTransform.offsetY;
+        
+        console.log('Terrain warp applied:', terrainTransform);
+      } catch (error) {
+        console.error('Terrain transformation error:', error);
+      }
+    }
+
+    return transform;
   }, [tattoo, isWarpingEnabled, warpPoints, warpStrength, stageSize]);
 
-  // Render mesh visualization
+  // Render terrain mesh visualization
   const renderMesh = useCallback(() => {
-    if (!showMesh || meshTriangles.length === 0) return null;
+    if (!showMesh || terrainMesh.points.length === 0) return null;
 
-    return meshTriangles.map((triangle, index) => {
-      const points = triangle.points.flatMap(point => [
-        point.x * stageSize.width,
-        point.y * stageSize.height
-      ]);
-      
-      // Add first point again to close the triangle
-      points.push(points[0], points[1]);
-      
-      // Color based on depth (heat map)
-      const avgDepth = triangle.centroid.z;
-      const hue = (1 - avgDepth) * 120; // Green to red
-      const color = `hsl(${hue}, 70%, 50%)`;
+    const lines = [];
+    const gridSize = 15; // Should match the gridSize used in generateTerrainMesh
+    
+    // Draw horizontal lines
+    for (let row = 0; row < gridSize; row++) {
+      const points = [];
+      for (let col = 0; col < gridSize; col++) {
+        const index = row * gridSize + col;
+        if (index * 2 + 1 < terrainMesh.points.length) {
+          points.push(
+            terrainMesh.points[index * 2] * stageSize.width,
+            terrainMesh.points[index * 2 + 1] * stageSize.height
+          );
+        }
+      }
+      if (points.length > 2) {
+        lines.push(
+          <Line
+            key={`h-${row}`}
+            points={points}
+            stroke={terrainMesh.colors[row * gridSize] || '#666'}
+            strokeWidth={1}
+            opacity={0.4}
+            listening={false}
+          />
+        );
+      }
+    }
+    
+    // Draw vertical lines
+    for (let col = 0; col < gridSize; col++) {
+      const points = [];
+      for (let row = 0; row < gridSize; row++) {
+        const index = row * gridSize + col;
+        if (index * 2 + 1 < terrainMesh.points.length) {
+          points.push(
+            terrainMesh.points[index * 2] * stageSize.width,
+            terrainMesh.points[index * 2 + 1] * stageSize.height
+          );
+        }
+      }
+      if (points.length > 2) {
+        lines.push(
+          <Line
+            key={`v-${col}`}
+            points={points}
+            stroke={terrainMesh.colors[col] || '#666'}
+            strokeWidth={1}
+            opacity={0.4}
+            listening={false}
+          />
+        );
+      }
+    }
 
-      return (
-        <Line
-          key={`mesh-${index}`}
-          points={points}
-          stroke={color}
-          strokeWidth={1}
-          opacity={0.3}
-          listening={false}
-        />
-      );
-    });
-  }, [showMesh, meshTriangles, stageSize]);
+    return lines;
+  }, [showMesh, terrainMesh, stageSize]);
 
-  // Render warp points
+  // Render warp points with proper selection
   const renderWarpPoints = useCallback(() => {
     if (!showWarpPoints) return null;
 
     return warpPoints.map((point) => {
-      const radius = 8 + (point.z * 12); // Size based on depth
+      const radius = 6 + (point.z * 8); // Size based on depth
       const isSelected = selectedWarpPoint === point.id;
       
       return (
@@ -304,18 +359,22 @@ export default function KonvaCanvasRenderer({
           x={point.x * stageSize.width}
           y={point.y * stageSize.height}
           radius={radius}
-          fill={isSelected ? '#ff6b6b' : '#4ecdc4'}
-          stroke={isSelected ? '#ff4757' : '#00d2d3'}
-          strokeWidth={2}
-          opacity={0.8}
+          fill={isSelected ? '#ff6b6b' : `hsl(${(1-point.z)*120}, 70%, 60%)`}
+          stroke={isSelected ? '#ff4757' : '#ffffff'}
+          strokeWidth={isSelected ? 3 : 2}
+          opacity={0.9}
           shadowBlur={4}
           shadowColor="black"
           shadowOpacity={0.3}
           draggable={!point.isLocked}
-          onDragStart={() => handleWarpPointDragStart(point.id)}
+          onDragStart={() => {
+            setIsDragging(true);
+            setDragTarget('warpPoint');
+            onSelectedWarpPointChange(point.id);
+          }}
           onDragEnd={(e) => handleWarpPointDragEnd(e, point.id)}
-          onClick={() => setSelectedWarpPoint(point.id)}
-          onTap={() => setSelectedWarpPoint(point.id)}
+          onClick={(e) => handleWarpPointClick(point.id, e)}
+          onTap={(e) => handleWarpPointClick(point.id, e)}
           onMouseEnter={(e) => {
             e.target.getStage()!.container().style.cursor = 'pointer';
           }}
@@ -325,14 +384,22 @@ export default function KonvaCanvasRenderer({
         />
       );
     });
-  }, [
-    showWarpPoints,
-    warpPoints,
-    stageSize,
-    selectedWarpPoint,
-    handleWarpPointDragStart,
-    handleWarpPointDragEnd
-  ]);
+  }, [showWarpPoints, warpPoints, stageSize, selectedWarpPoint, handleWarpPointClick, handleWarpPointDragEnd, onSelectedWarpPointChange]);
+
+  // Debounced canvas resize handler
+  const handleResize = useCallback(
+    debounce(() => {
+      const container = stageRef.current?.container();
+      if (container) {
+        const { offsetWidth, offsetHeight } = container.parentElement!;
+        setStageSize({
+          width: offsetWidth,
+          height: offsetHeight
+        });
+      }
+    }, 100),
+    []
+  );
 
   useEffect(() => {
     handleResize();
@@ -376,6 +443,7 @@ export default function KonvaCanvasRenderer({
         <Layer>
           {tattooImageObj && tattoo && (
             <Image
+              key={`tattoo-${effectsKey}`}
               ref={tattooImageRef}
               image={tattooImageObj}
               {...tattooTransform}
@@ -389,17 +457,13 @@ export default function KonvaCanvasRenderer({
               onMouseLeave={(e) => {
                 e.target.getStage()!.container().style.cursor = 'default';
               }}
-              filters={[
-                Konva.Filters.Brighten,
-                Konva.Filters.Contrast,
-                Konva.Filters.HSV,
-                Konva.Filters.Blur
-              ]}
-              brightness={((tattoo.brightness - 100) / 100)}
-              contrast={((tattoo.contrast - 100) / 100)}
+              filters={[Konva.Filters.Brighten, Konva.Filters.Contrast, Konva.Filters.HSV, Konva.Filters.Blur]}
+              brightness={(tattoo.brightness - 100) / 100}
+              contrast={(tattoo.contrast - 100) / 100}
               saturation={tattoo.saturation / 100}
               hue={tattoo.hue}
               blurRadius={tattoo.blur}
+              cache={{}}
             />
           )}
         </Layer>
@@ -423,9 +487,7 @@ export default function KonvaCanvasRenderer({
         {selectedWarpPoint && (
           <button
             onClick={() => {
-              const updatedPoints = warpPoints.filter(p => p.id !== selectedWarpPoint);
-              onWarpPointsUpdate(updatedPoints);
-              setSelectedWarpPoint(null);
+              removeWarpPoint(selectedWarpPoint);
             }}
             className="px-3 py-2 bg-red-500 text-white text-sm rounded-md hover:bg-red-600 shadow-lg"
           >

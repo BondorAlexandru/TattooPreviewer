@@ -1,270 +1,237 @@
-import { WarpPoint, MeshTriangle } from '@/types';
+import { WarpPoint, MeshTriangle, BodyShapePreset } from '@/types';
 
-// Delaunay triangulation for mesh generation
-export function generateDelaunayTriangulation(points: WarpPoint[]): MeshTriangle[] {
-  if (points.length < 3) return [];
+// Height map interpolation using inverse distance weighting
+export function interpolateHeight(x: number, y: number, warpPoints: WarpPoint[]): number {
+  if (warpPoints.length === 0) return 0.5; // Default height
   
-  const triangles: MeshTriangle[] = [];
+  let totalWeight = 0;
+  let weightedHeight = 0;
   
-  // Simple triangulation for now - in production, use a proper Delaunay algorithm
-  for (let i = 0; i < points.length - 2; i++) {
-    for (let j = i + 1; j < points.length - 1; j++) {
-      for (let k = j + 1; k < points.length; k++) {
-        const triangle: MeshTriangle = {
-          points: [points[i], points[j], points[k]],
-          centroid: {
-            x: (points[i].x + points[j].x + points[k].x) / 3,
-            y: (points[i].y + points[j].y + points[k].y) / 3,
-            z: (points[i].z + points[j].z + points[k].z) / 3,
-          }
-        };
-        triangles.push(triangle);
-      }
+  for (const point of warpPoints) {
+    const dx = x - point.x;
+    const dy = y - point.y;
+    const distance = Math.sqrt(dx * dx + dy * dy);
+    
+    // If we're very close to a point, use its height directly
+    if (distance < 0.001) {
+      return point.z;
+    }
+    
+    // Inverse squared distance weighting with falloff
+    const weight = 1 / (distance * distance + 0.01);
+    totalWeight += weight;
+    weightedHeight += point.z * weight;
+  }
+  
+  return weightedHeight / totalWeight;
+}
+
+// Calculate how the tattoo should be transformed based on terrain
+export function calculateTerrainTransform(
+  tattooPos: { x: number, y: number },
+  tattooSize: { width: number, height: number },
+  warpPoints: WarpPoint[],
+  warpStrength: number
+): {
+  scaleX: number;
+  scaleY: number;
+  skewX: number;
+  skewY: number;
+  offsetX: number;
+  offsetY: number;
+} {
+  if (warpPoints.length === 0 || warpStrength === 0) {
+    return {
+      scaleX: 1,
+      scaleY: 1,
+      skewX: 0,
+      skewY: 0,
+      offsetX: 0,
+      offsetY: 0
+    };
+  }
+  
+  // Sample height at key points around the tattoo
+  const centerHeight = interpolateHeight(tattooPos.x, tattooPos.y, warpPoints);
+  const leftHeight = interpolateHeight(tattooPos.x - tattooSize.width * 0.25, tattooPos.y, warpPoints);
+  const rightHeight = interpolateHeight(tattooPos.x + tattooSize.width * 0.25, tattooPos.y, warpPoints);
+  const topHeight = interpolateHeight(tattooPos.x, tattooPos.y - tattooSize.height * 0.25, warpPoints);
+  const bottomHeight = interpolateHeight(tattooPos.x, tattooPos.y + tattooSize.height * 0.25, warpPoints);
+  
+  // Calculate the strength factor (0-1)
+  const strength = warpStrength / 100;
+  
+  // Height differences create gradients
+  const horizontalGradient = (rightHeight - leftHeight) * strength;
+  const verticalGradient = (bottomHeight - topHeight) * strength;
+  
+  // Base scale from center height (higher = larger, like cloth stretching over a hill)
+  const baseScale = 0.7 + (centerHeight * 0.6); // Range: 0.7 to 1.3
+  const heightScale = 1 + (centerHeight - 0.5) * strength * 0.8;
+  
+  // Apply gradients as skew to simulate draping
+  const skewX = horizontalGradient * 15; // Convert to degrees
+  const skewY = verticalGradient * 15;
+  
+  // Slight position offset based on height (cloth sags in valleys, rises on hills)
+  const offsetX = (centerHeight - 0.5) * strength * 10;
+  const offsetY = (centerHeight - 0.5) * strength * 10;
+  
+  return {
+    scaleX: baseScale * heightScale,
+    scaleY: baseScale * heightScale,
+    skewX: skewX,
+    skewY: skewY,
+    offsetX: offsetX,
+    offsetY: offsetY
+  };
+}
+
+// Create a visual height map for debugging
+export function createHeightMapVisualization(
+  width: number,
+  height: number,
+  warpPoints: WarpPoint[]
+): ImageData {
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d')!;
+  const imageData = ctx.createImageData(width, height);
+  
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const normalizedX = x / width;
+      const normalizedY = y / height;
+      const height_val = interpolateHeight(normalizedX, normalizedY, warpPoints);
+      
+      // Convert height to color (blue = low, red = high)
+      const intensity = Math.floor(height_val * 255);
+      const index = (y * width + x) * 4;
+      
+      imageData.data[index] = intensity; // Red
+      imageData.data[index + 1] = 100; // Green
+      imageData.data[index + 2] = 255 - intensity; // Blue
+      imageData.data[index + 3] = 100; // Alpha
     }
   }
   
-  return triangles;
+  return imageData;
 }
 
-// Barycentric coordinate calculation
-export function getBarycentricCoordinates(
-  point: { x: number; y: number },
-  triangle: [WarpPoint, WarpPoint, WarpPoint]
-): { u: number; v: number; w: number } {
-  const [p1, p2, p3] = triangle;
+// Remove old triangulation functions and replace with terrain visualization
+export function generateTerrainMesh(warpPoints: WarpPoint[], gridSize: number = 20): {
+  points: number[];
+  colors: string[];
+} {
+  const points: number[] = [];
+  const colors: string[] = [];
   
-  const denom = (p2.y - p3.y) * (p1.x - p3.x) + (p3.x - p2.x) * (p1.y - p3.y);
-  const u = ((p2.y - p3.y) * (point.x - p3.x) + (p3.x - p2.x) * (point.y - p3.y)) / denom;
-  const v = ((p3.y - p1.y) * (point.x - p3.x) + (p1.x - p3.x) * (point.y - p3.y)) / denom;
-  const w = 1 - u - v;
+  for (let row = 0; row < gridSize; row++) {
+    for (let col = 0; col < gridSize; col++) {
+      const x = col / (gridSize - 1);
+      const y = row / (gridSize - 1);
+      const height = interpolateHeight(x, y, warpPoints);
+      
+      points.push(x, y);
+      
+      // Color based on height (green = low, red = high)
+      const hue = height * 120; // 0 = red, 120 = green
+      colors.push(`hsl(${120 - hue}, 70%, 50%)`);
+    }
+  }
   
-  return { u, v, w };
+  return { points, colors };
 }
 
-// Interpolate Z-depth using barycentric coordinates
-export function interpolateDepth(
-  point: { x: number; y: number },
-  triangle: [WarpPoint, WarpPoint, WarpPoint]
-): number {
-  const barycentric = getBarycentricCoordinates(point, triangle);
-  const [p1, p2, p3] = triangle;
-  
-  return barycentric.u * p1.z + barycentric.v * p2.z + barycentric.w * p3.z;
-}
-
-// Calculate perspective scaling based on depth
-export function getPerspectiveScale(depth: number): number {
-  // Closer points (higher z) should appear larger
-  // Further points (lower z) should appear smaller
-  return 0.5 + (depth * 0.5); // Scale between 0.5 and 1.0
-}
-
-// Auto-detect body contour points using edge detection
+// Auto-detect warp points (simplified for terrain approach)
 export function autoDetectWarpPoints(
   imageData: ImageData,
-  numPoints: number = 20
+  maxPoints: number = 8
 ): Omit<WarpPoint, 'id'>[] {
   const { width, height, data } = imageData;
   const points: Omit<WarpPoint, 'id'>[] = [];
   
-  // Simple edge detection using Sobel operator
-  const edges: number[][] = [];
-  for (let y = 0; y < height; y++) {
-    edges[y] = [];
-    for (let x = 0; x < width; x++) {
-      edges[y][x] = calculateEdgeStrength(data, x, y, width, height);
+  // Simple grid-based detection with random heights for demo
+  const gridSize = Math.ceil(Math.sqrt(maxPoints));
+  
+  for (let row = 0; row < gridSize && points.length < maxPoints; row++) {
+    for (let col = 0; col < gridSize && points.length < maxPoints; col++) {
+      const x = (col + 0.5) / gridSize;
+      const y = (row + 0.5) / gridSize;
+      
+      // Assign random heights to create interesting terrain
+      const z = 0.2 + Math.random() * 0.6;
+      
+      points.push({ x, y, z });
     }
   }
   
-  // Find contour points by scanning edges
-  const contourPoints = findContourPoints(edges, width, height);
-  
-  // Select evenly distributed points from contour
-  const selectedPoints = selectDistributedPoints(contourPoints, numPoints);
-  
-  // Estimate depth based on brightness/shading
-  return selectedPoints.map(point => ({
-    x: point.x / width,
-    y: point.y / height,
-    z: estimateDepthFromShading(data, point.x, point.y, width, height)
-  }));
+  return points;
 }
 
-// Calculate edge strength using Sobel operator
-function calculateEdgeStrength(
-  data: Uint8ClampedArray,
-  x: number,
-  y: number,
-  width: number,
-  height: number
-): number {
-  if (x <= 0 || x >= width - 1 || y <= 0 || y >= height - 1) return 0;
-  
-  const getPixel = (px: number, py: number) => {
-    const idx = (py * width + px) * 4;
-    return (data[idx] + data[idx + 1] + data[idx + 2]) / 3; // Grayscale
-  };
-  
-  // Sobel X
-  const gx = -1 * getPixel(x - 1, y - 1) + 1 * getPixel(x + 1, y - 1) +
-             -2 * getPixel(x - 1, y) + 2 * getPixel(x + 1, y) +
-             -1 * getPixel(x - 1, y + 1) + 1 * getPixel(x + 1, y + 1);
-  
-  // Sobel Y
-  const gy = -1 * getPixel(x - 1, y - 1) + -2 * getPixel(x, y - 1) + -1 * getPixel(x + 1, y - 1) +
-             1 * getPixel(x - 1, y + 1) + 2 * getPixel(x, y + 1) + 1 * getPixel(x + 1, y + 1);
-  
-  return Math.sqrt(gx * gx + gy * gy);
-}
-
-// Find contour points from edge data
-function findContourPoints(
-  edges: number[][],
-  width: number,
-  height: number
-): { x: number; y: number; strength: number }[] {
-  const points: { x: number; y: number; strength: number }[] = [];
-  const threshold = 50; // Adjust based on image
-  
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      if (edges[y][x] > threshold) {
-        points.push({ x, y, strength: edges[y][x] });
-      }
-    }
-  }
-  
-  return points.sort((a, b) => b.strength - a.strength);
-}
-
-// Select evenly distributed points from contour
-function selectDistributedPoints(
-  points: { x: number; y: number; strength: number }[],
-  numPoints: number
-): { x: number; y: number }[] {
-  if (points.length <= numPoints) return points;
-  
-  const selected: { x: number; y: number }[] = [];
-  const step = Math.floor(points.length / numPoints);
-  
-  for (let i = 0; i < numPoints; i++) {
-    const idx = i * step;
-    if (idx < points.length) {
-      selected.push(points[idx]);
-    }
-  }
-  
-  return selected;
-}
-
-// Estimate depth based on pixel brightness/shading
-function estimateDepthFromShading(
-  data: Uint8ClampedArray,
-  x: number,
-  y: number,
-  width: number,
-  height: number
-): number {
-  const idx = (y * width + x) * 4;
-  const brightness = (data[idx] + data[idx + 1] + data[idx + 2]) / 3;
-  
-  // Brighter areas are typically closer (higher z)
-  // Darker areas are typically further (lower z)
-  return brightness / 255;
-}
-
-// Apply warping transformation to a point
-export function applyWarpTransformation(
-  point: { x: number; y: number },
-  warpPoints: WarpPoint[],
-  warpStrength: number
-): { x: number; y: number; scale: number } {
-  if (warpPoints.length < 3) {
-    return { ...point, scale: 1 };
-  }
-  
-  const triangles = generateDelaunayTriangulation(warpPoints);
-  
-  // Find which triangle contains the point
-  const containingTriangle = findContainingTriangle(point, triangles);
-  
-  if (!containingTriangle) {
-    return { ...point, scale: 1 };
-  }
-  
-  // Interpolate depth at this point
-  const depth = interpolateDepth(point, containingTriangle.points);
-  
-  // Calculate perspective scaling
-  const perspectiveScale = getPerspectiveScale(depth);
-  
-  // Apply warp strength
-  const finalScale = 1 + (perspectiveScale - 1) * (warpStrength / 100);
-  
-  return {
-    x: point.x,
-    y: point.y,
-    scale: finalScale
-  };
-}
-
-// Find triangle containing a point
-function findContainingTriangle(
-  point: { x: number; y: number },
-  triangles: MeshTriangle[]
-): MeshTriangle | null {
-  for (const triangle of triangles) {
-    const barycentric = getBarycentricCoordinates(point, triangle.points);
-    
-    // Point is inside if all barycentric coordinates are positive
-    if (barycentric.u >= 0 && barycentric.v >= 0 && barycentric.w >= 0) {
-      return triangle;
-    }
-  }
-  
-  return null;
-}
-
-// Generate body shape presets
-export const BODY_SHAPE_PRESETS = {
+// Body shape presets with height-based thinking
+export const BODY_SHAPE_PRESETS: Record<string, BodyShapePreset> = {
   arm: {
     id: 'arm',
-    name: 'Arm (Cylindrical)',
-    type: 'cylindrical' as const,
-    description: 'Optimized for arm tattoos with cylindrical warping',
+    name: 'Arm/Limb',
+    type: 'cylindrical',
+    description: 'Curved surface with muscle definition',
     warpPoints: [
-      { x: 0.2, y: 0.3, z: 0.8 },
-      { x: 0.8, y: 0.3, z: 0.2 },
-      { x: 0.5, y: 0.5, z: 1.0 },
-      { x: 0.2, y: 0.7, z: 0.8 },
-      { x: 0.8, y: 0.7, z: 0.2 },
+      { x: 0.2, y: 0.3, z: 0.3 }, // Valley
+      { x: 0.5, y: 0.4, z: 0.8 }, // Muscle peak
+      { x: 0.8, y: 0.5, z: 0.4 }, // Side slope
+      { x: 0.4, y: 0.7, z: 0.6 }, // Secondary muscle
     ]
   },
   shoulder: {
     id: 'shoulder',
-    name: 'Shoulder (Spherical)',
-    type: 'spherical' as const,
-    description: 'Optimized for shoulder tattoos with spherical warping',
+    name: 'Shoulder',
+    type: 'spherical',
+    description: 'Rounded shoulder contour',
     warpPoints: [
-      { x: 0.3, y: 0.2, z: 0.9 },
-      { x: 0.7, y: 0.2, z: 0.9 },
-      { x: 0.5, y: 0.4, z: 1.0 },
-      { x: 0.2, y: 0.6, z: 0.7 },
-      { x: 0.8, y: 0.6, z: 0.7 },
-      { x: 0.5, y: 0.8, z: 0.5 },
+      { x: 0.3, y: 0.2, z: 0.9 }, // Shoulder peak
+      { x: 0.1, y: 0.5, z: 0.4 }, // Armpit valley
+      { x: 0.6, y: 0.3, z: 0.7 }, // Upper arm
+      { x: 0.5, y: 0.6, z: 0.5 }, // Chest transition
     ]
   },
   back: {
     id: 'back',
-    name: 'Back (Planar)',
-    type: 'planar' as const,
-    description: 'Optimized for back tattoos with minimal warping',
+    name: 'Back',
+    type: 'planar',
+    description: 'Spine valley with muscle ridges',
     warpPoints: [
-      { x: 0.2, y: 0.2, z: 0.9 },
-      { x: 0.8, y: 0.2, z: 0.9 },
-      { x: 0.2, y: 0.8, z: 0.9 },
-      { x: 0.8, y: 0.8, z: 0.9 },
-      { x: 0.5, y: 0.5, z: 1.0 },
+      { x: 0.5, y: 0.2, z: 0.3 }, // Spine valley top
+      { x: 0.2, y: 0.4, z: 0.8 }, // Left muscle ridge
+      { x: 0.8, y: 0.4, z: 0.8 }, // Right muscle ridge
+      { x: 0.5, y: 0.6, z: 0.2 }, // Lower spine valley
+      { x: 0.3, y: 0.8, z: 0.6 }, // Left lower back
+      { x: 0.7, y: 0.8, z: 0.6 }, // Right lower back
+    ]
+  },
+  chest: {
+    id: 'chest',
+    name: 'Chest',
+    type: 'spherical',
+    description: 'Pectoral muscle definition',
+    warpPoints: [
+      { x: 0.3, y: 0.3, z: 0.8 }, // Left pec peak
+      { x: 0.7, y: 0.3, z: 0.8 }, // Right pec peak
+      { x: 0.5, y: 0.2, z: 0.4 }, // Sternum valley
+      { x: 0.5, y: 0.6, z: 0.6 }, // Lower chest
+    ]
+  },
+  leg: {
+    id: 'leg',
+    name: 'Leg/Thigh',
+    type: 'cylindrical',
+    description: 'Curved leg musculature',
+    warpPoints: [
+      { x: 0.4, y: 0.2, z: 0.7 }, // Quad peak
+      { x: 0.2, y: 0.5, z: 0.4 }, // Inner thigh valley
+      { x: 0.8, y: 0.4, z: 0.6 }, // Outer thigh
+      { x: 0.5, y: 0.8, z: 0.5 }, // Knee area
     ]
   }
 }; 

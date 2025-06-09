@@ -44,6 +44,7 @@ interface TattooSidebarProps {
   onShowWarpPointsChange: (show: boolean) => void;
   onWarpingEnabledChange: (enabled: boolean) => void;
   onExport: (options: ExportOptions) => void;
+  selectedWarpPoint: string | null;
   className?: string;
 }
 
@@ -63,6 +64,7 @@ export default function TattooSidebar({
   onShowWarpPointsChange,
   onWarpingEnabledChange,
   onExport,
+  selectedWarpPoint,
   className
 }: TattooSidebarProps) {
   const [isCollapsed, setIsCollapsed] = useState(false);
@@ -715,6 +717,109 @@ export default function TattooSidebar({
                 • Click point to select/delete
               </div>
             </div>
+
+            {/* Selected Warp Point Controls */}
+            {warpPoints.length > 0 && (
+              <div className="space-y-4">
+                <h3 className="font-medium text-gray-900">Point Controls</h3>
+                
+                {selectedWarpPoint ? (
+                  <>
+                    {/* Point Depth/Height Control */}
+                    <div>
+                      <label className="block text-sm text-gray-700 mb-2">
+                        Selected Point Depth: {formatNumber((warpPoints.find(p => p.id === selectedWarpPoint)?.z || 0.5) * 100, 0)}%
+                      </label>
+                      <Slider.Root
+                        value={[((warpPoints.find(p => p.id === selectedWarpPoint)?.z || 0.5) * 100)]}
+                        onValueChange={([value]) => {
+                          const updatedPoints = warpPoints.map(point =>
+                            point.id === selectedWarpPoint
+                              ? { ...point, z: value / 100 }
+                              : point
+                          );
+                          onWarpPointsUpdate(updatedPoints);
+                        }}
+                        min={0}
+                        max={100}
+                        step={5}
+                        className="relative flex items-center select-none touch-none w-full h-5"
+                      >
+                        <Slider.Track className="bg-gray-200 relative grow rounded-full h-2">
+                          <Slider.Range className="absolute bg-purple-500 rounded-full h-full" />
+                        </Slider.Track>
+                        <Slider.Thumb className="block w-4 h-4 bg-white border-2 border-purple-500 rounded-full shadow-lg" />
+                      </Slider.Root>
+                      <div className="text-xs text-gray-500 mt-1">
+                        0% = Far (back), 100% = Close (front)
+                      </div>
+                    </div>
+
+                    {/* Quick Depth Presets */}
+                    <div>
+                      <label className="block text-sm text-gray-700 mb-2">Quick Depth</label>
+                      <div className="flex gap-2">
+                        {[
+                          { label: 'Back', value: 0.2 },
+                          { label: 'Mid', value: 0.5 },
+                          { label: 'Front', value: 0.8 }
+                        ].map((preset) => (
+                          <button
+                            key={preset.label}
+                            onClick={() => {
+                              const updatedPoints = warpPoints.map(point =>
+                                point.id === selectedWarpPoint
+                                  ? { ...point, z: preset.value }
+                                  : point
+                              );
+                              onWarpPointsUpdate(updatedPoints);
+                            }}
+                            className="px-3 py-1 text-xs bg-gray-100 hover:bg-gray-200 rounded transition-colors"
+                          >
+                            {preset.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <div className="text-sm text-gray-500 italic">
+                    Click a warp point to adjust its depth
+                  </div>
+                )}
+
+                {/* Add/Remove Points */}
+                <div>
+                  <label className="block text-sm text-gray-700 mb-2">Point Management</label>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => {
+                        // Clear all points
+                        onWarpPointsUpdate([]);
+                      }}
+                      className="px-3 py-1 text-xs bg-red-100 hover:bg-red-200 text-red-700 rounded transition-colors"
+                    >
+                      Clear All
+                    </button>
+                    <button
+                      onClick={() => {
+                        // Add point at center
+                        const newPoint: WarpPoint = {
+                          id: Date.now().toString(),
+                          x: 0.5,
+                          y: 0.5,
+                          z: 0.5
+                        };
+                        onWarpPointsUpdate([...warpPoints, newPoint]);
+                      }}
+                      className="px-3 py-1 text-xs bg-blue-100 hover:bg-blue-200 text-blue-700 rounded transition-colors"
+                    >
+                      Add Center
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </Tabs.Content>
         </Tabs.Root>
       </div>

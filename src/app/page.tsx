@@ -32,6 +32,8 @@ export default function TattooPreviewApp() {
     isWarpingEnabled: false
   });
 
+  const [selectedWarpPoint, setSelectedWarpPoint] = useState<string | null>(null);
+
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   // Update body image
@@ -165,7 +167,8 @@ export default function TattooPreviewApp() {
         onShowWarpPointsChange={handleShowWarpPointsChange}
         onWarpingEnabledChange={handleWarpingEnabledChange}
         onExport={handleExport}
-        className="h-full"
+        selectedWarpPoint={selectedWarpPoint}
+        className="z-10"
       />
 
       {/* Main Content */}
@@ -223,6 +226,8 @@ export default function TattooPreviewApp() {
               onWarpPointsUpdate={handleWarpPointsUpdate}
               onCanvasClick={handleCanvasClick}
               onBodyImageUpdate={handleBodyImageUpdate}
+              selectedWarpPoint={selectedWarpPoint}
+              onSelectedWarpPointChange={setSelectedWarpPoint}
               className="w-full h-full"
             />
           </div>
